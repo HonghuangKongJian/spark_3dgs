@@ -1,6 +1,9 @@
 # 运行时由 server.py 生成的 LCC 数据集上传目录
 __upload__/
 
+# 用户 LCC 数据集（约 1.3GB，体积过大，禁止入库）
+lcc-result/
+
 # Python
 __pycache__/
 *.pyc
