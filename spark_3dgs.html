@@ -33,12 +33,18 @@
     <label style="font-size:0.8em;color:#aaa;">LCC AppKey（可选）:</label><br>
     <input type="text" id="appKeyInput" placeholder="留空则带水印" style="width:170px;margin-top:2px;background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:3px 5px;">
   </div>
+  <div style="margin-top:8px;padding-top:8px;border-top:1px solid #444;">
+    <label style="font-size:0.8em;color:#aaa;">本地 LCC 目录（直接加载，免上传）:</label><br>
+    <input type="text" id="lccDirectInput" value="lcc-result/bs.lcc" style="width:170px;margin-top:2px;background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:3px 5px;">
+    <button id="lccDirectBtn" style="margin-top:4px;width:100%;cursor:pointer;background:#2a9d4f;color:#fff;border:none;border-radius:4px;padding:6px;">直接加载该目录 LCC</button>
+    <div style="font-size:0.72em;color:#888;margin-top:3px;">注：数据需放在本服务可访问路径下（如 lcc-result/）。</div>
+  </div>
   <div class="instructions">
     • 左键拖拽: 旋转<br>
     • 右键拖拽: 平移<br>
     • 滚轮: 缩放<br>
     • .ply/.spz/.splat: 上方"选择文件"<br>
-    • .lcc 数据集: 点"选择 LCC 数据集文件夹"（自动适配任意命名，如 bs.lcc）
+    • .lcc 数据集: 优先用上方"直接加载该目录 LCC"（数据在本服务路径下，免上传）；否则点"选择 LCC 数据集文件夹"上传。
   </div>
   <div id="status" style="margin-top:5px; color:#4f4;">Ready</div>
 </div>
@@ -255,8 +261,23 @@
           statusEl.innerText = "LCC 加载失败";
           statusEl.style.color = "red";
           console.error("LCC object loading failure");
-          // 诊断：核对 SDK 需要的 4 个规范文件是否都已上传成功
-          if (diag && diag.uid) {
+          // 诊断：直接加载时核对工作区内规范文件是否可达
+          if (diag && diag.direct) {
+            const base = new URL(".", diag.dataPath).href.replace(/\/$/, "");
+            const need = ["bs.lcc", "index.bin", "environment.bin", "data.bin", "shcoef.bin", "collision.lci"];
+            Promise.all(need.map(n => fetch(base + "/" + n)
+              .then(r => ({ n, ok: r.ok }))
+              .catch(() => ({ n, ok: false }))))
+              .then(res => {
+                const miss = res.filter(x => !x.ok).map(x => x.n);
+                if (miss.length) {
+                  statusEl.innerText = "LCC 加载失败，缺失文件: " + miss.join(", ");
+                  console.error("Missing LCC files on server:", miss);
+                } else {
+                  console.warn("LCC 规范文件齐全但仍加载失败，疑似 LCC Web SDK 0.6.2 与 LCC v5.0 格式不匹配。");
+                }
+              });
+          } else if (diag && diag.uid) {
             const base = location.origin + "/__upload__/" + diag.uid;
             const need = ["meta.lcc", "meta.splat", "index.bin", "environment.bin"];
             Promise.all(need.map(n => fetch(base + "/" + n)
@@ -370,6 +391,28 @@
     event.target.value = ''; // 允许重复选择同一文件夹
   });
 
+  // 直接加载本地 LCC 目录（免上传）：数据已由本地服务托管在 http(s) 下，
+  // 直接把 dataPath 指向该目录内的主 .lcc 文件即可，SDK 会自动按文件名主干
+  // 派生同目录的 index.bin / environment.bin / data.bin / shcoef.bin / collision.lci。
+  // 注意：缺失的 <stem>.splat 仅作 .lcc 加载失败时的降级回退，不影响直接加载。
+  const lccDirectInput = document.getElementById('lccDirectInput');
+  const lccDirectBtn = document.getElementById('lccDirectBtn');
+  lccDirectBtn.addEventListener('click', () => {
+    const p = (lccDirectInput.value || '').trim();
+    const sEl = document.getElementById('status');
+    if (location.protocol === 'file:') {
+      __showInfo('当前以 file:// 打开，无法直连本地数据。请双击“启动查看器.bat”，\n它会起本地服务并在浏览器以 http://localhost:8137/spark_3dgs.html 打开本页。');
+      return;
+    }
+    if (!p) { sEl.innerText = "请填写本地 LCC 主文件路径"; sEl.style.color = "red"; return; }
+    let dp;
+    try { dp = new URL(p, location.href).href; }
+    catch (e) { dp = p; }
+    const inv = ["dataPath: " + dp, "（直接从本地服务读取，未上传）"];
+    loadLcc(dp, { direct: true, dataPath: dp, inventory: inv.join("\n") });
+    controls.reset();
+  });
+
   renderer.setAnimationLoop(() => {
     controls.update();
     if (currentLcc) {
@@ -378,15 +421,15 @@
       } catch (e) {
         if (!lccUpdateErrShown) {
           lccUpdateErrShown = true;
-          const inv = lastLccDiag ? ("\n\n已上传文件:\n" + lastLccDiag.inventory) : "";
+          const inv = lastLccDiag ? ("\n\n已加载路径/文件:\n" + lastLccDiag.inventory) : "";
           __showErr(
             "LCC 渲染时出错（高度疑似 数据/格式不匹配）：\n" +
             ((e && e.message) ? e.message : e) +
             inv +
-            "\n\n常见原因：\n1) bs.lcc 与 bs.splat 点数不一致（两者非同一次导出）\n" +
-            "2) bs.lcc 格式版本与 LCC Web SDK 0.6.2 不兼容\n" +
-            "3) bs.splat / index.bin / environment.bin 缺失或被错误映射\n\n" +
-            "请按 F12 控制台查看详细堆栈，并把上方“已上传文件”清单发我。"
+            "\n\n常见原因：\n1) bs.lcc(v5.0 清单) 与数据文件(data.bin/shcoef.bin) 点数/格式不一致\n" +
+            "2) LCC v5.0（13.8M 点、COMPRESS 编码、5 级 LOD）与 LCC Web SDK 0.6.2 不兼容\n" +
+            "3) index.bin / environment.bin / data.bin / shcoef.bin 缺失或路径不可达\n\n" +
+            "请按 F12 控制台查看详细堆栈，并把上方“已加载路径/文件”清单发我。"
           );
           console.error(e);
         }

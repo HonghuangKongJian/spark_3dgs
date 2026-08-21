@@ -51,6 +51,67 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(405, "Method Not Allowed")
 
+    def send_head(self):
+        # 支持 Range 请求：LCC 数据集的 data.bin(444MB)/shcoef.bin(888MB)
+        # 体积大，SDK 会以 Range 方式分块拉取/Seek，必须正确返回 206 与 Content-Range。
+        path = self.translate_path(self.path)
+        if os.path.isdir(path):
+            if not self.path.endswith("/"):
+                self.send_response(301)
+                self.send_header("Location", self.path + "/")
+                self.end_headers()
+                return None
+            for index in ("index.html", "index.htm"):
+                idx = os.path.join(path, index)
+                if os.path.exists(idx):
+                    path = idx
+                    break
+            else:
+                return self.list_directory(path)
+
+        ctype = self.guess_type(path)
+        try:
+            f = open(path, "rb")
+        except OSError:
+            self.send_error(404, "File not found")
+            return None
+
+        fs = os.fstat(f.fileno())
+        size = fs[6]
+        range_header = self.headers.get("Range")
+        if range_header:
+            try:
+                rng = range_header.split("=", 1)[1].strip()
+                start_str, end_str = rng.split("-", 1)
+                start = int(start_str) if start_str else 0
+                end = int(end_str) if end_str else size - 1
+                if end >= size:
+                    end = size - 1
+                if start > end or start < 0:
+                    raise ValueError("bad range")
+                length = end - start + 1
+                self.send_response(206)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+                self.send_header("Content-Length", str(length))
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Last-Modified", self.date_time_string(fs.st_mtime))
+                self.end_headers()
+                f.seek(start)
+                self.wfile.write(f.read(length))
+                f.close()
+                return None
+            except Exception:  # noqa: BLE001
+                f.close()
+                # 解析失败则回退到整文件发送
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Last-Modified", self.date_time_string(fs.st_mtime))
+        self.end_headers()
+        return f
+
     def end_headers(self):
         # 允许跨域（同源时无害，便于本地调试）
         self.send_header("Access-Control-Allow-Origin", "*")
