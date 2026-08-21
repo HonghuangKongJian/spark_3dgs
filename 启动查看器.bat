@@ -4,7 +4,7 @@ setlocal
 
 set "PROJECT_DIR=F:\test\spark_3dgs"
 set "PYTHON=C:\Users\amw\.workbuddy\binaries\python\versions\3.13.12\python.exe"
-set "PORT=8123"
+set "PORT=8137"
 set "URL=http://localhost:%PORT%/spark_3dgs.html"
 
 cd /d "%PROJECT_DIR%"
@@ -16,9 +16,9 @@ if %errorlevel%==0 (
     goto :open
 )
 
-REM Start HTTP server in background
+REM Start local server (server.py supports uploads for LCC datasets)
 echo [INFO] Starting local server on port %PORT% ...
-start "" "%PYTHON%" -m http.server %PORT% --bind 127.0.0.1
+start "" "%PYTHON%" "%PROJECT_DIR%\server.py" %PORT%
 if errorlevel 1 (
     echo [ERROR] Failed to start server. Check Python path.
     pause

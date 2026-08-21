@@ -1,0 +1,16 @@
+# 运行时由 server.py 生成的 LCC 数据集上传目录
+__upload__/
+
+# Python
+__pycache__/
+*.pyc
+
+# 临时/日志
+_*.log
+_mod_check.mjs
+
+# LCC Web SDK 仅保留 sdk/ 与说明，忽略其自带示例/引擎/资源
+LCC-Web-0.6.2/examples/
+LCC-Web-0.6.2/doc/
+LCC-Web-0.6.2/.vscode/
+LCC-Web-0.6.2/assets/

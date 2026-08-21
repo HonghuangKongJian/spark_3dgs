@@ -27,10 +27,18 @@
 <div id="ui-container">
   <div style="font-weight:bold; margin-bottom:8px;">Splat Viewer</div>
   <input type="file" id="fileInput" accept=".ply,.spz,.splat">
+  <button id="lccBtn" style="margin-top:6px;width:100%;cursor:pointer;background:#2a6df4;color:#fff;border:none;border-radius:4px;padding:6px;">选择 LCC 数据集文件夹</button>
+  <input type="file" id="lccFolderInput" webkitdirectory directory multiple style="display:none;">
+  <div style="margin-top:6px;">
+    <label style="font-size:0.8em;color:#aaa;">LCC AppKey（可选）:</label><br>
+    <input type="text" id="appKeyInput" placeholder="留空则带水印" style="width:170px;margin-top:2px;background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:3px 5px;">
+  </div>
   <div class="instructions">
     • 左键拖拽: 旋转<br>
     • 右键拖拽: 平移<br>
-    • 滚轮: 缩放
+    • 滚轮: 缩放<br>
+    • .ply/.spz/.splat: 上方"选择文件"<br>
+    • .lcc 数据集: 点"选择 LCC 数据集文件夹"
   </div>
   <div id="status" style="margin-top:5px; color:#4f4;">Ready</div>
 </div>
@@ -52,7 +60,7 @@
   // file:// 为不透明源，Spark 2.x 的 Worker 无法 fetch blob: 本地文件，故【选择本地文件】会失败。
   // 默认 CDN 模型不受影响；本地文件请用 http(s) 方式打开本页。
   if (location.protocol === 'file:') {
-    __showInfo('当前以 file:// 方式打开：默认模型(CDN)可正常显示，但【选择本地文件】会因浏览器安全限制失败。\n请改用本地 HTTP 服务打开本页（例如在文件目录运行 python -m http.server 8000，再访问 http://localhost:8000/spark_3dgs.html）。');
+    __showInfo('当前以 file:// 方式打开：默认模型(CDN)可正常显示，但【选择本地文件 / LCC 文件夹】会因浏览器安全限制失败。\n请双击项目内的“启动查看器.bat”，它会自动起本地服务并在浏览器打开本页（http://localhost:8137/spark_3dgs.html）。');
   }
   function __showErr(text) {
     var box = document.getElementById('errbox');
@@ -91,6 +99,7 @@
   import * as THREE from "three";
   import { OrbitControls } from "three/addons/controls/OrbitControls.js";
   import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+  import { LCCRender } from "./LCC-Web-0.6.2/sdk/lcc-sdk-three.js";
 
   // 用于调试：如果出错，会在控制台看到
   window.onerror = function(msg, url, line) {
@@ -130,11 +139,33 @@
   });
 
   let currentSplat = null;
+  let currentLcc = null;
+
+  // 释放 Spark 模型（高斯泼溅）
+  function releaseSplat() {
+    if (currentSplat) {
+      scene.remove(currentSplat);
+      currentSplat.dispose?.();
+      if (currentSplat.geometry) currentSplat.geometry.dispose();
+      if (currentSplat.material) currentSplat.material.dispose();
+      currentSplat = null;
+    }
+  }
+
+  // 释放 LCC 模型（XGRIDS 专有格式）
+  function releaseLcc() {
+    if (currentLcc) {
+      try { LCCRender.unload(currentLcc); } catch (e) { console.warn("LCC unload warn:", e); }
+      currentLcc = null;
+    }
+  }
 
   async function loadSplat(url) {
     document.getElementById('status').innerText = "Loading...";
     
     try {
+      releaseLcc();
+      if (!scene.children.includes(spark)) scene.add(spark); // 确保 Spark 渲染通道在 Spark 模型下启用
       if (currentSplat) {
         scene.remove(currentSplat);
         currentSplat.dispose?.(); // Spark 2.x: 推荐用 dispose() 释放 SplatMesh 占用的 GPU 资源
@@ -164,21 +195,135 @@
     }
   }
 
-  // 加载默认模型
+  // 读取已保存的 LCC AppKey（localStorage 持久化，避免每次重填）
+  const appKeyInput = document.getElementById('appKeyInput');
+  if (appKeyInput) {
+    appKeyInput.value = localStorage.getItem('lcc_appkey') || '';
+    appKeyInput.addEventListener('input', () => {
+      localStorage.setItem('lcc_appkey', appKeyInput.value.trim());
+    });
+  }
+  function getAppKey() {
+    return (appKeyInput && appKeyInput.value.trim()) ? appKeyInput.value.trim() : undefined;
+  }
+
+  // LCC 标准坐标系纠正矩阵（处理 Z-up 数据到场景朝向）
+  const lccModelMatrix = new THREE.Matrix4(-1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1);
+
+  // 加载 LCC 数据集。dataPath 必须是 http(s) URL 且指向 meta.lcc；
+  // SDK 内部用 new URL() 解析并派生同目录的 meta.splat / data / index 等兄弟文件，
+  // 因此 blob: 或单文件都无法工作，必须经由本地 HTTP 服务。
+  async function loadLcc(dataPath) {
+    const statusEl = document.getElementById('status');
+    statusEl.innerText = "LCC 加载中...";
+    statusEl.style.color = "#4f4";
+    try {
+      releaseSplat();
+      releaseLcc();
+      scene.remove(spark); // LCC 使用自有渲染路径，移除 Spark 渲染通道避免干扰
+      currentLcc = LCCRender.load(
+        {
+          camera: camera,
+          scene: scene,
+          renderer: renderer,
+          canvas: renderer.domElement,
+          dataPath: dataPath,
+          renderLib: THREE,
+          useEnv: true,
+          useIndexDB: false,        // 本地数据集关闭索引缓存，避免 URL 失效
+          useLoadingEffect: true,
+          modelMatrix: lccModelMatrix,
+          appKey: getAppKey(),      // 留空则带水印，仅警告
+        },
+        (mesh) => {
+          statusEl.innerText = "LCC Loaded";
+          console.log("LCC object Loaded:", mesh);
+          try {
+            currentLcc.setStartLod(0);
+            currentLcc.setMaxSplats(8000000);
+            currentLcc.setMaxNodeSplats(4000000);
+            currentLcc.setMaxDistance(200);
+            currentLcc.setLodAutoLevelUp(true);
+          } catch (e) { console.warn("LCC perf config warn:", e); }
+        },
+        (percent) => {
+          statusEl.innerText = "LCC 加载中: " + (percent * 100).toFixed(1) + "%";
+        },
+        () => {
+          statusEl.innerText = "LCC 加载失败";
+          statusEl.style.color = "red";
+          console.error("LCC object loading failure");
+        }
+      );
+    } catch (e) {
+      console.error(e);
+      statusEl.innerText = "LCC Error";
+      statusEl.style.color = "red";
+    }
+  }
+
+  // 将选中的 LCC 数据集文件夹上传到本地服务，再加载
+  async function uploadLccFolder(files) {
+    const statusEl = document.getElementById('status');
+    const list = Array.from(files || []);
+    if (!list.length) return;
+    const uid = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+    let metaRel = null;
+    const total = list.length;
+    let done = 0;
+    statusEl.innerText = "上传 LCC 数据集 0/" + total;
+    statusEl.style.color = "#4f4";
+    try {
+      for (const file of list) {
+        // webkitRelativePath: "TopFolder/子目录/meta.lcc" -> 去掉顶层文件夹
+        let rel = file.webkitRelativePath || file.name;
+        const parts = rel.split("/");
+        if (parts.length > 1) rel = parts.slice(1).join("/");
+        if (rel.endsWith("meta.lcc")) metaRel = rel;
+        const body = await file.arrayBuffer();
+        const resp = await fetch("/__upload__/" + uid + "/" + rel, { method: "POST", body: body });
+        if (!resp.ok) throw new Error("上传失败: " + rel + " (" + resp.status + ")");
+        done++;
+        statusEl.innerText = "上传 LCC 数据集 " + done + "/" + total;
+      }
+      if (!metaRel) {
+        statusEl.innerText = "未找到 meta.lcc，请选择含 meta.lcc 的 LCC 数据集文件夹";
+        statusEl.style.color = "red";
+        return;
+      }
+      const dataPath = location.origin + "/__upload__/" + uid + "/" + metaRel;
+      loadLcc(dataPath);
+    } catch (e) {
+      console.error(e);
+      statusEl.innerText = "LCC 上传失败: " + e.message;
+      statusEl.style.color = "red";
+    }
+  }
+
+  // 加载默认模型（Spark 蝴蝶）
   loadSplat("https://sparkjs.dev/assets/splats/butterfly.spz");
 
   const fileInput = document.getElementById('fileInput');
   fileInput.addEventListener('change', (event) => {
     const file = event.target.files[0];
-    if (file) {
-      const objectUrl = URL.createObjectURL(file);
-      loadSplat(objectUrl);
-      controls.reset();
-    }
+    if (!file) return;
+    const objectUrl = URL.createObjectURL(file);
+    loadSplat(objectUrl);
+    controls.reset();
+  });
+
+  // LCC 数据集：选择整个文件夹 -> 上传到本地服务 -> 加载
+  const lccBtn = document.getElementById('lccBtn');
+  const lccFolderInput = document.getElementById('lccFolderInput');
+  lccBtn.addEventListener('click', () => lccFolderInput.click());
+  lccFolderInput.addEventListener('change', (event) => {
+    uploadLccFolder(event.target.files);
+    event.target.value = ''; // 允许重复选择同一文件夹
   });
 
   renderer.setAnimationLoop(() => {
     controls.update();
+    if (currentLcc) LCCRender.update(); // LCC 每帧需更新内部缓冲/LOD
     renderer.render(scene, camera);
   });
 
