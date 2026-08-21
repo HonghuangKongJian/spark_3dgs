@@ -38,7 +38,7 @@
     • 右键拖拽: 平移<br>
     • 滚轮: 缩放<br>
     • .ply/.spz/.splat: 上方"选择文件"<br>
-    • .lcc 数据集: 点"选择 LCC 数据集文件夹"
+    • .lcc 数据集: 点"选择 LCC 数据集文件夹"（自动适配任意命名，如 bs.lcc）
   </div>
   <div id="status" style="margin-top:5px; color:#4f4;">Ready</div>
 </div>
@@ -210,10 +210,10 @@
   // LCC 标准坐标系纠正矩阵（处理 Z-up 数据到场景朝向）
   const lccModelMatrix = new THREE.Matrix4(-1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1);
 
-  // 加载 LCC 数据集。dataPath 必须是 http(s) URL 且指向 meta.lcc；
-  // SDK 内部用 new URL() 解析并派生同目录的 meta.splat / data / index 等兄弟文件，
-  // 因此 blob: 或单文件都无法工作，必须经由本地 HTTP 服务。
-  async function loadLcc(dataPath) {
+  // 加载 LCC 数据集。dataPath 为经本地服务托管的 http(s) URL，指向规范化后的 meta.lcc；
+  // SDK 内部用 new URL() 解析 dataPath，按文件名主干派生同目录兄弟文件（meta.splat / index.bin / environment.bin），
+  // 因此 blob: 或单文件都无法工作，必须经由本地 HTTP 服务。上传阶段已自动补齐这些规范文件名。
+  async function loadLcc(dataPath, diag) {
     const statusEl = document.getElementById('status');
     statusEl.innerText = "LCC 加载中...";
     statusEl.style.color = "#4f4";
@@ -253,6 +253,23 @@
           statusEl.innerText = "LCC 加载失败";
           statusEl.style.color = "red";
           console.error("LCC object loading failure");
+          // 诊断：核对 SDK 需要的 4 个规范文件是否都已上传成功
+          if (diag && diag.uid) {
+            const base = location.origin + "/__upload__/" + diag.uid;
+            const need = ["meta.lcc", "meta.splat", "index.bin", "environment.bin"];
+            Promise.all(need.map(n => fetch(base + "/" + n)
+              .then(r => ({ n, ok: r.ok }))
+              .catch(() => ({ n, ok: false }))))
+              .then(res => {
+                const miss = res.filter(x => !x.ok).map(x => x.n);
+                if (miss.length) {
+                  statusEl.innerText = "LCC 加载失败，缺失文件: " + miss.join(", ");
+                  console.error("Missing LCC files on server:", miss);
+                } else {
+                  console.warn("LCC 规范文件齐全但仍加载失败，可能是 three 版本或数据本身问题。");
+                }
+              });
+          }
         }
       );
     } catch (e) {
@@ -262,37 +279,63 @@
     }
   }
 
-  // 将选中的 LCC 数据集文件夹上传到本地服务，再加载
+  // 将选中的 LCC 数据集文件夹上传到本地服务，再加载。
+  // 关键：LCC SDK 内部用 dataPath 的文件名主干派生兄弟文件（如 bs.lcc -> bs.splat），
+  // 且 index.bin / environment.bin 为写死固定名。为兼容任意命名（如你的 bs.lcc），
+  // 这里把文件夹拍平，并主动补齐 SDK 需要的规范文件名（meta.lcc / meta.splat /
+  // index.bin / environment.bin），dataPath 指向规范后的 meta.lcc，确保一定能对上。
   async function uploadLccFolder(files) {
     const statusEl = document.getElementById('status');
     const list = Array.from(files || []);
     if (!list.length) return;
     const uid = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
-    let metaRel = null;
-    const total = list.length;
+
+    // 1) 以文件名（基名）建索引，忽略目录层级（标准 LCC 数据集为扁平结构）
+    const byName = new Map();
+    for (const f of list) {
+      const low = f.name.toLowerCase();
+      if (!byName.has(low)) byName.set(low, f);
+    }
+    const mainLcc = [...byName.values()].find(f => f.name.toLowerCase().endsWith('.lcc'));
+    if (!mainLcc) {
+      statusEl.innerText = "未找到 .lcc 文件，请选择含 .lcc 的 LCC 数据集文件夹";
+      statusEl.style.color = "red";
+      return;
+    }
+    const splatFile = [...byName.values()].find(f => f.name.toLowerCase().endsWith('.splat'));
+    const binFiles = [...byName.values()].filter(f => f.name.toLowerCase().endsWith('.bin') && !f.name.toLowerCase().endsWith('.splat'));
+    const indexFile = binFiles.find(f => f.name.toLowerCase().includes('index'))
+                  || binFiles[0];
+    const envFile = binFiles.find(f => f.name.toLowerCase().includes('environment'))
+                || binFiles.find(f => f !== indexFile);
+
+    // 2) 构造上传清单：原始文件 + 规范化别名
+    const uploads = new Map(); // lowName -> File
+    const add = (targetName, srcFile) => {
+      const low = targetName.toLowerCase();
+      if (!uploads.has(low)) uploads.set(low, srcFile);
+    };
+    for (const f of byName.values()) add(f.name, f);   // 原始文件
+    add('meta.lcc', mainLcc);                          // 主文件别名（内容=你的 bs.lcc）
+    if (splatFile) add('meta.splat', splatFile);        // splat 别名
+    if (indexFile) add('index.bin', indexFile);         // index 别名
+    if (envFile) add('environment.bin', envFile);       // environment 别名
+
+    // 3) 逐个上传
+    const total = uploads.size;
     let done = 0;
     statusEl.innerText = "上传 LCC 数据集 0/" + total;
     statusEl.style.color = "#4f4";
     try {
-      for (const file of list) {
-        // webkitRelativePath: "TopFolder/子目录/meta.lcc" -> 去掉顶层文件夹
-        let rel = file.webkitRelativePath || file.name;
-        const parts = rel.split("/");
-        if (parts.length > 1) rel = parts.slice(1).join("/");
-        if (rel.endsWith("meta.lcc")) metaRel = rel;
+      for (const [name, file] of uploads) {
         const body = await file.arrayBuffer();
-        const resp = await fetch("/__upload__/" + uid + "/" + rel, { method: "POST", body: body });
-        if (!resp.ok) throw new Error("上传失败: " + rel + " (" + resp.status + ")");
+        const resp = await fetch("/__upload__/" + uid + "/" + name, { method: "POST", body: body });
+        if (!resp.ok) throw new Error("上传失败: " + name + " (" + resp.status + ")");
         done++;
         statusEl.innerText = "上传 LCC 数据集 " + done + "/" + total;
       }
-      if (!metaRel) {
-        statusEl.innerText = "未找到 meta.lcc，请选择含 meta.lcc 的 LCC 数据集文件夹";
-        statusEl.style.color = "red";
-        return;
-      }
-      const dataPath = location.origin + "/__upload__/" + uid + "/" + metaRel;
-      loadLcc(dataPath);
+      const dataPath = location.origin + "/__upload__/" + uid + "/meta.lcc";
+      loadLcc(dataPath, { uid: uid, mainName: mainLcc.name });
     } catch (e) {
       console.error(e);
       statusEl.innerText = "LCC 上传失败: " + e.message;
