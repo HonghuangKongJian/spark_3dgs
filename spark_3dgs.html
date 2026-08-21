@@ -140,6 +140,8 @@
 
   let currentSplat = null;
   let currentLcc = null;
+  let lastLccDiag = null;       // 记录最近一次 LCC 上传的文件清单（用于出错时诊断）
+  let lccUpdateErrShown = false; // 避免帧循环错误反复弹窗
 
   // 释放 Spark 模型（高斯泼溅）
   function releaseSplat() {
@@ -335,7 +337,11 @@
         statusEl.innerText = "上传 LCC 数据集 " + done + "/" + total;
       }
       const dataPath = location.origin + "/__upload__/" + uid + "/meta.lcc";
-      loadLcc(dataPath, { uid: uid, mainName: mainLcc.name });
+      // 记录上传清单，供出错时诊断（文件名 + 字节数）
+      const inv = [];
+      for (const [name, file] of uploads) inv.push(name + ": " + (file.size / 1024).toFixed(1) + " KB");
+      lastLccDiag = { uid: uid, mainName: mainLcc.name, dataPath, inventory: inv.join("\n") };
+      loadLcc(dataPath, lastLccDiag);
     } catch (e) {
       console.error(e);
       statusEl.innerText = "LCC 上传失败: " + e.message;
@@ -366,7 +372,26 @@
 
   renderer.setAnimationLoop(() => {
     controls.update();
-    if (currentLcc) LCCRender.update(); // LCC 每帧需更新内部缓冲/LOD
+    if (currentLcc) {
+      try {
+        LCCRender.update(); // LCC 每帧需更新内部缓冲/LOD
+      } catch (e) {
+        if (!lccUpdateErrShown) {
+          lccUpdateErrShown = true;
+          const inv = lastLccDiag ? ("\n\n已上传文件:\n" + lastLccDiag.inventory) : "";
+          __showErr(
+            "LCC 渲染时出错（高度疑似 数据/格式不匹配）：\n" +
+            ((e && e.message) ? e.message : e) +
+            inv +
+            "\n\n常见原因：\n1) bs.lcc 与 bs.splat 点数不一致（两者非同一次导出）\n" +
+            "2) bs.lcc 格式版本与 LCC Web SDK 0.6.2 不兼容\n" +
+            "3) bs.splat / index.bin / environment.bin 缺失或被错误映射\n\n" +
+            "请按 F12 控制台查看详细堆栈，并把上方“已上传文件”清单发我。"
+          );
+          console.error(e);
+        }
+      }
+    }
     renderer.render(scene, camera);
   });
 
