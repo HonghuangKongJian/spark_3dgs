@@ -35,16 +35,54 @@
   <div id="status" style="margin-top:5px; color:#4f4;">Ready</div>
 </div>
 
-<!-- 
-  修复点 1: 使用 esm.sh 作为模块源。
-  这能确保 three 和 OrbitControls 引用的是同一个核心实例，避免报错。
+<div id="errbox" style="display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#ff5555; font-family:sans-serif; background:rgba(0,0,0,0.85); padding:16px; border-radius:8px; max-width:80%; z-index:200; white-space:pre-wrap; line-height:1.5;"></div>
+
+<div id="infobox" style="display:none; position:absolute; top:10px; left:50%; transform:translateX(-50%); color:#ffd24d; font-family:sans-serif; background:rgba(0,0,0,0.8); padding:10px 14px; border-radius:8px; max-width:80%; z-index:200; white-space:pre-wrap; line-height:1.5; text-align:center;"></div>
+
+<!--
+  模块加载看门狗：若 ESM 模块导入失败（CDN 404/解析错误/无 WebGL），
+  模块内代码不会执行，因此错误捕获必须放在模块外部的经典脚本里。
+-->
+<script>
+  window.__sparkReady = false;
+  function __showInfo(text) {
+    var box = document.getElementById('infobox');
+    if (box) { box.style.display = 'block'; box.textContent = text; }
+  }
+  // file:// 为不透明源，Spark 2.x 的 Worker 无法 fetch blob: 本地文件，故【选择本地文件】会失败。
+  // 默认 CDN 模型不受影响；本地文件请用 http(s) 方式打开本页。
+  if (location.protocol === 'file:') {
+    __showInfo('当前以 file:// 方式打开：默认模型(CDN)可正常显示，但【选择本地文件】会因浏览器安全限制失败。\n请改用本地 HTTP 服务打开本页（例如在文件目录运行 python -m http.server 8000，再访问 http://localhost:8000/spark_3dgs.html）。');
+  }
+  function __showErr(text) {
+    var box = document.getElementById('errbox');
+    if (box) { box.style.display = 'block'; box.textContent = text; }
+  }
+  // useCapture=true 才能捕获 <script>/<link> 等资源加载错误
+  window.addEventListener('error', function (e) {
+    var msg = e.message || (e.target && (e.target.src || e.target.href) ? ('资源加载失败: ' + (e.target.src || e.target.href)) : '未知错误');
+    __showErr('加载出错：\n' + msg + '\n\n请按 F12 打开控制台查看详细报错。');
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    __showErr('运行时错误：\n' + ((e.reason && e.reason.message) || e.reason) + '\n\n请按 F12 打开控制台查看详细报错。');
+  });
+  setTimeout(function () {
+    if (!window.__sparkReady) {
+      __showErr('加载超时（8 秒）。可能原因：\n1) 网络无法访问 CDN（jsdelivr / sparkjs.dev）\n2) 浏览器不支持 WebGL\n3) ESM 模块导入失败\n\n请按 F12 打开控制台查看详细报错。');
+    }
+  }, 8000);
+</script>
+
+<!--
+  使用 jsdelivr 作为 three 模块源（Spark 2.x 内部会 import "three/addons/..."，
+  用统一的 importmap 可确保 app / OrbitControls / Spark 三处引用的是同一个 three 实例）。
 -->
 <script type="importmap">
   {
     "imports": {
-      "three": "https://esm.sh/three@0.170.0",
-      "three/addons/": "https://esm.sh/three@0.170.0/examples/jsm/",
-      "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js"
+      "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/",
+      "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.1.0/spark.module.js"
     }
   }
 </script>
@@ -52,7 +90,7 @@
 <script type="module">
   import * as THREE from "three";
   import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-  import { SplatMesh } from "@sparkjsdev/spark";
+  import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 
   // 用于调试：如果出错，会在控制台看到
   window.onerror = function(msg, url, line) {
@@ -70,6 +108,11 @@
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   document.body.appendChild(renderer.domElement);
+
+  // Spark 2.x 关键变更：必须创建 SparkRenderer 并加入场景，
+  // 它负责在 Three.js 渲染循环中驱动高斯泼溅的专用渲染通道。
+  const spark = new SparkRenderer({ renderer });
+  scene.add(spark);
 
   // 初始化控制器
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -94,6 +137,7 @@
     try {
       if (currentSplat) {
         scene.remove(currentSplat);
+        currentSplat.dispose?.(); // Spark 2.x: 推荐用 dispose() 释放 SplatMesh 占用的 GPU 资源
         if (currentSplat.geometry) currentSplat.geometry.dispose();
         if (currentSplat.material) currentSplat.material.dispose();
         currentSplat = null;
@@ -137,6 +181,9 @@
     controls.update();
     renderer.render(scene, camera);
   });
+
+  // 标记模块已成功初始化，关闭加载看门狗
+  window.__sparkReady = true;
 </script>
 
 </body>
